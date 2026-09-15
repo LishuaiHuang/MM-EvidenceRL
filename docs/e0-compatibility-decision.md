@@ -16,6 +16,8 @@
 
 两台节点的 GPU 均可被 PyTorch 访问，计算节点报告 8 张 RTX 4090、单卡约 48 GiB 显存。计算节点驱动报告 CUDA 13.0，实际候选 PyTorch runtime 为 CUDA 12.4 或 12.8；这属于驱动向后兼容条件，仍需模型加载探针确认。
 
+默认 Hugging Face 缓存为 `/amax/home/lishuai/.cache/huggingface`，当前约占 90G、根盘剩余约 146G。缓存中没有 `Qwen2.5-VL-3B-Instruct`：已有 `Qwen2.5-3B`（文本模型）和 `Qwen3-VL-4B-Instruct`（约 8.3G），二者都不能替代目标模型。
+
 ## 暂定选择
 
 - **主线多模态 runtime 候选：** `reflectagent-grpo`（Python 3.10、PyTorch 2.9.0+cu128、Transformers 4.57.3、vLLM 0.11.1、Ray 2.51.2、`qwen-vl-utils` 0.0.14）。它同时通过了 HF 模型类导入和 vLLM Qwen2.5-VL 架构注册。
