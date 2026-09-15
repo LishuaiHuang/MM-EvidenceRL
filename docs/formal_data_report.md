@@ -6,6 +6,7 @@
 
 - `datasets/manifests/formal_sft.jsonl`：6,000 条轨迹；4,200 条 ChartQA perception、1,800 条 FVQA knowledge。
 - `datasets/manifests/formal_sft_split.jsonl`：同一批轨迹的稳定 split 版本，按 dataset/group_id 分配 90% `sft_train`、10% `sft_dev`。
+- `datasets/formal/images/chartqa/`：4,200 张 ChartQA 图像，从已校验 ZIP 抽取。
 - `datasets/formal/images/fvqa/`：1,800 张 FVQA 图像，从 Parquet 的嵌入图像字段抽取。
 - `datasets/indices/formal_search/evidence.sqlite3`：24,046 条 FVQA 搜索缓存结果，含 SQLite FTS5 全文索引。
 
@@ -25,6 +26,7 @@
 - FVQA：1,620 `sft_train` / 180 `sft_dev`。
 - sample_id 和 `(dataset, group_id)` 均唯一；同一 group 没有跨 split。
 - 所有图片路径、搜索 evidence 引用和动作名均通过审计。
+- split manifest 的 6,000 条图片路径全部位于 `datasets/formal/`，可作为计算节点 prepared data 的交付根目录，不依赖数据节点的 raw 路径。
 
 ## 生成
 

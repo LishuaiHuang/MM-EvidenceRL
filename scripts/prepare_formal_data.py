@@ -2,6 +2,7 @@
 
 import json
 import pickle
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -62,8 +63,9 @@ def build_evidence_index(cache_path, index_path):
     return cache
 
 
-def chartqa_records(root, excluded_groups):
+def chartqa_records(root, image_dir, excluded_groups):
     split_dir = root / "ChartQA Dataset" / "train"
+    image_dir.mkdir(parents=True, exist_ok=True)
     records = []
     seen_groups = set(excluded_groups)
     for filename in ("train_human.json", "train_augmented.json"):
@@ -82,6 +84,9 @@ def chartqa_records(root, excluded_groups):
             x0, y0 = bbox["x"], bbox["y"]
             x1, y1 = x0 + bbox["w"], y0 + bbox["h"]
             sample_id = f"chartqa_{group_id}_{len(records):05d}"
+            prepared_image = image_dir / item["imgname"]
+            if not prepared_image.exists():
+                shutil.copyfile(image, prepared_image)
             crop_evidence_id = f"{sample_id}:crop:0"
             records.append(
                 {
@@ -93,7 +98,7 @@ def chartqa_records(root, excluded_groups):
                     "group_id": group_id,
                     "task_mode": "perception",
                     "trajectory_type": "oracle",
-                    "image_path": str(image),
+                    "image_path": str(prepared_image),
                     "question": item["query"],
                     "answer": item["label"],
                     "answer_type": "text",
@@ -190,7 +195,11 @@ def main():
         Path("datasets/raw/fvqa/fvqa_train_image_search_results_cache.pkl"),
         Path("datasets/indices/formal_search/evidence.sqlite3"),
     )
-    perception = chartqa_records(Path("datasets/raw/chartqa/extracted"), excluded_chart_groups)
+    perception = chartqa_records(
+        Path("datasets/raw/chartqa/extracted"),
+        Path("datasets/formal/images/chartqa"),
+        excluded_chart_groups,
+    )
     knowledge = fvqa_records(
         Path("datasets/raw/fvqa/fvqa_train.parquet"),
         Path("datasets/formal/images/fvqa"),
