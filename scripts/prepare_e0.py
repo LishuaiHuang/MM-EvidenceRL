@@ -29,7 +29,7 @@ def chartqa_records(root, limit=20):
         height = bbox["h"]
         records.append(
             {
-                "sample_id": f"chartqa_{Path(image_name).stem}",
+                "sample_id": f"chartqa_{Path(image_name).stem}_{len(records):04d}",
                 "dataset": "chartqa",
                 "dataset_revision": CHARTQA_REV,
                 "split": "train",
