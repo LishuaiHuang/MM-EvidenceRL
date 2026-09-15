@@ -76,3 +76,14 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n reflectagent-grpo \
 - 尚未验证 vLLM serving、多轮 action logprob、response mask 或 Ray/learner 对接。
 - 尚未验证 200 条连续 episode 的 OOM、worker desync 和长时间稳定性。
 - 当前 crop/search 轨迹是最小运行探针，不是训练数据或正式 evaluator 结果。
+
+## vLLM 单卡 serving 探针
+
+在同一缓存 snapshot、`reflectagent-grpo` 和 `vLLM 0.11.1` 上执行了单图 `LLM.generate`。观测到：
+
+- 架构解析成功：`Qwen2_5_VLForConditionalGeneration`；
+- 权重占用约 `7.16 GiB`；
+- vLLM engine 初始化约 `87.5 s`，其中包含 compile、KV cache 和 CUDA graph warmup；
+- 单图请求成功生成中文文档描述，未发生 OOM。
+
+vLLM 日志显示其内部仍默认加载 fast `Qwen2VLImageProcessor`，与 HF 探针显式使用的 slow processor 不一致。这是正式 rollout 前必须冻结的处理器配置风险；当前不能把 HF 与 vLLM 的视觉 token 或答案直接混合比较。该探针也没有验证 action logprob、response mask 或 learner 对接。
