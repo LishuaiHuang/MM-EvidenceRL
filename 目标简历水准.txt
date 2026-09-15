@@ -1,0 +1,5 @@
+AgentRL:基于证据链课程强化学习的Agentic RAG多跳问答系统
+2026.02 - 2026.05
+研究问题:聚焦传统单轮 RAG在跨文档桥接推理中的证据链缺失与过早回答问题，设计多步 Search Agent，使模型依据中间证据逐轮生成
+查询、选择支持句，并输出带可核验引用的最终答案。检索环境:以 AgenticRagTrace 构造 Wikipedia多跳问题，并组合BM25 + BGE-M3+ RRF+ Reranker 建立混合索引;按60%成功 Oracle 轨迹、25% Teacher 多样化轨迹和15%查询漂移恢复轨迹，共生成6,000条SFT 轨迹及1,000条GRPO样本。Agent 设计:设计 Search/Read/AddEvidence/Answer 结构化动作空间;实现固定容量 Evidence Memory、历史查询去重、桥接实体 direct-read 和结构化 recovery feedback，在最多4次 Search、6 次 Read 和 8K token 预算内完成多跳检索与引用回答。训练方案:先使用LLaMA-Factory、DeepSpeed 对 Qwen3-8B进行 LoRA SFT,仅监督Agent生成的查询、工具动作、证据选择和答案token，并以 Joint F1、完整证据链召回和工具成本联合选择 checkpoint;再通过 verl、vLLM、Ray 和 FSDP 在真实检索环境中执行 on-pollcy GRPO，每题采样4条完整轨迹，采用两阶段课程奖励:Stage1优化新增 supporting-fact、引用有效性和grounding，Stage 2 强化 Answer EM/F1并保留证据约束;同时加入重复查询、冗余证据、非法动作和工具成本惩罚，配合KL约束、零方差group重采样及reward component 分布监控抑制策略退化。实验结果:在页面隔离的 sealed test 上,将 Answer F1 从 Base ReAct 的约 0.43提升 SFT 的 0.50和 GRPO 的 0.53。 GRPO相较 SFT将 JolintF1提升约4%、完整证据链 AlIl-Hit 提升约6%，将冗余调用率从28%降至22%、平均工具调用从4.8 次降至
+4.2次，并在 MuSiQue zero-shot 上保持约1.5 %增益。
