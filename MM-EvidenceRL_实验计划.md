@@ -157,7 +157,7 @@ MM_EvidenceRL/
 - Git commit 和 dirty-worktree 标记；
 - resolved config；
 - 模型名、revision、processor revision；
-- 数据集版本、manifest SHA256、搜索语料 snapshot id；
+- 数据集版本、manifest 文件名/版本、搜索语料 snapshot id；
 - CUDA、driver、PyTorch、Transformers、vLLM、veRL/Ray 版本；
 - GPU 型号和数量、Host RAM；
 - seed；
@@ -423,7 +423,7 @@ SFT 数据检查：
 
 - perception 400、knowledge 400；
 - 按 image/document/entity `group_id` 隔离；
-- 在 SFT/GRPO 前生成并记录 manifest hash；
+- 在 SFT/GRPO 前固定 manifest 文件和样本计数，并记录生成时间；
 - 训练和开发期间不查看逐题模型结果；
 - reward 和 checkpoint 固定后只进行正式评测；
 - 如需修 evaluator，只允许在不读取模型答案的情况下修确定性 bug，并保留审计记录。
@@ -439,7 +439,7 @@ split 顺序必须是：
 
 不得先随机问题再切分，否则同一图片、同一文档页、同一实体或同一模板可能跨集合。至少检查：
 
-- image hash/perceptual hash；
+- image/document/entity 的来源 id 和去重后的样本计数；
 - document id/page id；
 - entity id；
 - question/answer 近重复；
@@ -864,7 +864,7 @@ E0 通过后，下一步才是 200 条 SFT overfit；E0 未通过时，不开始
 [ ] Base/对照使用相同 manifest 和 evaluator
 [ ] config 已 resolve 并保存
 [ ] model/processor/data/search revision 已固定
-[ ] manifest hash 已保存且无泄漏
+[ ] manifest 版本、样本计数已保存且无泄漏
 [ ] action/reward/coordinate 单元测试通过
 [ ] visual token 与 max context 预算明确
 [ ] 预计 GPU/Host RAM 已通过 smoke
