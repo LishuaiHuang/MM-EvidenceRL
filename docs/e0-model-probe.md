@@ -9,7 +9,7 @@
 - 模型：`Qwen/Qwen2.5-VL-3B-Instruct@main`
 - GPU：单卡 `CUDA_VISIBLE_DEVICES=0`
 - 图片：仓库已有 `_pdf_qa/page-1.png`，尺寸 `1240 x 1754`
-- Processor：显式 `use_fast=False`
+- Processor：显式 `use_fast=True`，与 vLLM 实际路径统一
 - 权重缓存：`/amax/home/lishuai/.cache/huggingface`
 
 ## 单卡加载与生成
@@ -86,4 +86,4 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n reflectagent-grpo \
 - vLLM engine 初始化约 `87.5 s`，其中包含 compile、KV cache 和 CUDA graph warmup；
 - 单图请求成功生成中文文档描述，未发生 OOM。
 
-vLLM 日志显示其内部仍默认加载 fast `Qwen2VLImageProcessor`，与 HF 探针显式使用的 slow processor 不一致。这是正式 rollout 前必须冻结的处理器配置风险；当前不能把 HF 与 vLLM 的视觉 token 或答案直接混合比较。该探针也没有验证 action logprob、response mask 或 learner 对接。
+vLLM 的 Qwen2.5-VL processor 不接受 `use_fast=False`（会提示参数无效并忽略），因此环境冻结为 Transformers 和 vLLM 都使用 fast `Qwen2VLImageProcessor`。该探针也没有验证 action logprob、response mask 或 learner 对接。

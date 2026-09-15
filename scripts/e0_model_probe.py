@@ -33,7 +33,7 @@ def main() -> None:
     torch.cuda.reset_peak_memory_stats(device)
     started = time.perf_counter()
     processor = AutoProcessor.from_pretrained(
-        args.model, revision=args.revision, use_fast=False
+        args.model, revision=args.revision, use_fast=True
     )
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         args.model,

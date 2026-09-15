@@ -46,7 +46,7 @@ def main():
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    processor = AutoProcessor.from_pretrained(args.model, revision=args.revision, use_fast=False)
+    processor = AutoProcessor.from_pretrained(args.model, revision=args.revision, use_fast=True)
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         args.model, revision=args.revision, dtype=torch.bfloat16, device_map="cuda:0"
     )
