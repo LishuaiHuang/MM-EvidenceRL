@@ -112,7 +112,10 @@ def run_record(record, model, processor, device, args, trajectory_type):
                 "recovery_hint_bbox": [x0 / width, y0 / height, x1 / width, y1 / height],
             }
     for _ in range(args.max_steps):
-        raw = model_step(model, processor, current_image, action_prompt(record, history, injected), device, args.max_new_tokens)
+        prompt = action_prompt(record, history, injected)
+        if trajectory_type == "recovery" and record["task_mode"] == "perception":
+            prompt += "\nRecovery instruction: issue CROP with recovery_hint_bbox, then ANSWER with the new evidence_id."
+        raw = model_step(model, processor, current_image, prompt, device, args.max_new_tokens)
         action = parse_action(raw)
         raw_actions.append(raw)
         name = action["action"]
@@ -243,7 +246,7 @@ def main():
                 break
             try:
                 generated = run_record(record, model, processor, device, args, args.trajectory_type)
-            except (ValueError, RuntimeError, json.JSONDecodeError) as error:
+            except (ValueError, RuntimeError, KeyError, TypeError, IndexError, json.JSONDecodeError) as error:
                 rejection = {"sample_id": record["sample_id"], "trajectory_type": args.trajectory_type, "rejected": str(error)}
                 print(json.dumps(rejection))
                 if rejection_handle:
