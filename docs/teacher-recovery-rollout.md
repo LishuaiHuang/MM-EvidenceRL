@@ -20,7 +20,11 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n reflectagent-grpo \
 
 Perception records require `CROP → ANSWER`; searchable knowledge records
 require `SEARCH → ANSWER`. Recovery starts with an injected failed tool event
-and is retained only if a later tool call succeeds before the cited answer.
-Malformed actions, unsupported routes, wrong answers, and unknown citations
-fail the run rather than entering the SFT set. Generated JSONL remains local
-under `artifacts/`.
+and is retained only if a later tool call succeeds before the cited answer. The
+initial perception Recovery smoke uses the manifest bbox as an explicit
+`recovery_hint_bbox`; it is marked `recovery_guided=true` and is not counted as
+unguided Teacher quality.
+Malformed actions, unsupported routes, wrong answers, and unknown citations are
+reported as rejected candidates rather than entering the SFT set; the generator
+continues scanning other manifest records until `--limit` valid trajectories are
+collected. Generated JSONL remains local under `artifacts/`.

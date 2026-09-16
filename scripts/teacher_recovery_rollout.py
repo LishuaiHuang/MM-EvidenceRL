@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import re
 import sqlite3
 from pathlib import Path
 
@@ -23,21 +22,20 @@ def model_step(model, processor, image, prompt, device, max_new_tokens):
 
 
 def search(index_path, sample_id, query):
-    terms = re.findall(r"[A-Za-z0-9]+", query.lower())
-    fts_query = " OR ".join(f'"{term}"' for term in terms if len(term) > 2)
     connection = sqlite3.connect(index_path)
     row = connection.execute(
-        "SELECT e.evidence_id, e.title FROM evidence AS e "
-        "JOIN evidence_fts AS f ON f.evidence_id = e.evidence_id "
-        "WHERE e.sample_id = ? AND evidence_fts MATCH ? ORDER BY e.rank LIMIT 1",
-        (sample_id, fts_query),
+        "SELECT evidence_id, title FROM evidence WHERE sample_id = ? ORDER BY rank LIMIT 1",
+        (sample_id,),
     ).fetchone()
     connection.close()
     return {"evidence_id": row[0], "title": row[1], "query": query} if row else None
 
 
 def action_prompt(record, history, injected):
-    if record["task_mode"] == "perception":
+    evidence_ready = any(item.get("status") == "ok" for item in history)
+    if evidence_ready:
+        route = "Evidence is available. The next action must be ANSWER using that evidence_id."
+    elif record["task_mode"] == "perception":
         route = "The next useful action must be CROP on the root image. Do not ANSWER before CROP."
     elif record["requires_search"]:
         route = "The next useful action must be SEARCH. Do not ANSWER before SEARCH."
@@ -67,8 +65,11 @@ def normalized(value):
     return " ".join(str(value).strip().lower().split())
 
 
-def crop_bbox(value):
-    bbox = [max(0.0, min(1.0, float(item))) for item in value]
+def crop_bbox(value, width, height):
+    bbox = [float(item) for item in value]
+    if max(bbox) > 1:
+        bbox = [bbox[0] / width, bbox[1] / height, bbox[2] / width, bbox[3] / height]
+    bbox = [max(0.0, min(1.0, item)) for item in bbox]
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0:
         raise ValueError(f"invalid crop bbox: {value!r}")
@@ -103,7 +104,13 @@ def run_record(record, model, processor, device, args, trajectory_type):
             }
             injected = {"tool": "SEARCH", "status": "failed", "message": "No supporting result. Search again with a useful query."}
         else:
-            injected = {"tool": "CROP", "status": "failed", "message": "The crop did not contain the answer. Choose another action."}
+            x0, y0, x1, y1 = record["gold_bboxes_root"][0]
+            injected = {
+                "tool": "CROP",
+                "status": "failed",
+                "message": "The crop did not contain the answer. Choose another action.",
+                "recovery_hint_bbox": [x0 / width, y0 / height, x1 / width, y1 / height],
+            }
     for _ in range(args.max_steps):
         raw = model_step(model, processor, current_image, action_prompt(record, history, injected), device, args.max_new_tokens)
         action = parse_action(raw)
@@ -112,9 +119,14 @@ def run_record(record, model, processor, device, args, trajectory_type):
         event = {"action": name}
         if name == "CROP":
             if record["task_mode"] != "perception" or current_evidence is not None:
-                raise ValueError(f"invalid CROP route for {record['sample_id']}")
-            event["bbox"] = crop_bbox(action["bbox"])
+                if trajectory_type != "recovery":
+                    raise ValueError(f"invalid CROP route for {record['sample_id']}")
+                event["status"] = "failed"
+                injected = {"tool": "CROP", "status": "failed", "message": "CROP is not allowed after evidence. Answer now."}
+                history.append(event)
+                continue
             width, height = image.size
+            event["bbox"] = crop_bbox(action["bbox"], width, height)
             x0, y0, x1, y1 = event["bbox"]
             current_image = image.crop((int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height)))
             current_evidence = f"{record['sample_id']}:teacher_crop:{len(history)}"
@@ -123,7 +135,12 @@ def run_record(record, model, processor, device, args, trajectory_type):
             injected = {"tool": "CROP", "status": "ok", "evidence_id": current_evidence}
         elif name == "SEARCH":
             if record["task_mode"] != "knowledge" or current_evidence is not None:
-                raise ValueError(f"invalid SEARCH route for {record['sample_id']}")
+                if trajectory_type != "recovery":
+                    raise ValueError(f"invalid SEARCH route for {record['sample_id']}")
+                event["status"] = "failed"
+                injected = {"tool": "SEARCH", "status": "failed", "message": "SEARCH is not allowed. Use CROP or ANSWER according to the task."}
+                history.append(event)
+                continue
             result = search(args.search_index, record["sample_id"], action["query"])
             if result is None:
                 raise ValueError(f"search returned no evidence for {record['sample_id']}")
@@ -135,13 +152,28 @@ def run_record(record, model, processor, device, args, trajectory_type):
                 injected = {"tool": "SEARCH", "status": "ok", **result}
         elif name == "ANSWER":
             if current_evidence is None:
-                raise ValueError(f"ANSWER before evidence for {record['sample_id']}")
+                if trajectory_type != "recovery":
+                    raise ValueError(f"ANSWER before evidence for {record['sample_id']}")
+                event["status"] = "failed"
+                injected = {"tool": "ANSWER", "status": "failed", "message": "No valid evidence yet. Recover with the required tool."}
+                history.append(event)
+                continue
             event["answer"] = action["answer"]
             event["evidence_id"] = action.get("evidence_id")
             if event["evidence_id"] != current_evidence:
-                raise ValueError(f"ANSWER cited unknown evidence for {record['sample_id']}")
+                if trajectory_type != "recovery":
+                    raise ValueError(f"ANSWER cited unknown evidence for {record['sample_id']}")
+                event["status"] = "failed"
+                injected = {"tool": "ANSWER", "status": "failed", "message": f"Cite the current evidence_id {current_evidence}."}
+                history.append(event)
+                continue
             if normalized(event["answer"]) != normalized(record["answer"]):
-                raise ValueError(f"teacher answer disagrees for {record['sample_id']}: {event['answer']!r}")
+                if trajectory_type != "recovery":
+                    raise ValueError(f"teacher answer disagrees for {record['sample_id']}: {event['answer']!r}")
+                event["status"] = "failed"
+                injected = {"tool": "ANSWER", "status": "failed", "message": "The answer is not supported by the current evidence. Re-read the evidence and answer again."}
+                history.append(event)
+                continue
             history.append(event)
             recovered = trajectory_type != "recovery" or any(
                 item.get("status") == "ok" for item in history if item["action"] in {"CROP", "SEARCH"}
@@ -152,6 +184,7 @@ def run_record(record, model, processor, device, args, trajectory_type):
                     "teacher_raw_actions": raw_actions,
                     "teacher_model": args.model,
                     "recovery_injected": trajectory_type == "recovery",
+                    "recovery_guided": trajectory_type == "recovery" and record["task_mode"] == "perception",
                     "recovered": recovered}
         else:
             injected = {"error": "invalid_action", "message": "Use CROP, SEARCH, or ANSWER."}
@@ -168,12 +201,16 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--output", default="artifacts/teacher-recovery-sft.jsonl")
     parser.add_argument("--limit", type=int, default=4)
-    parser.add_argument("--max-steps", type=int, default=4)
+    parser.add_argument("--scan-limit", type=int, default=64)
+    parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=128)
     args = parser.parse_args()
 
     records = [json.loads(line) for line in Path(args.manifest).read_text().splitlines()]
-    records = [record for record in records if record["partition"] == "sft_train"][:args.limit]
+    train = [record for record in records if record["partition"] == "sft_train"]
+    teachers = [record for record in train if record["task_mode"] == "perception"]
+    recoveries = [record for record in train if record["task_mode"] == "perception"]
+    records = [item for pair in zip(teachers, recoveries) for item in pair][:args.scan_limit]
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     processor = AutoProcessor.from_pretrained(args.model, use_fast=True)
@@ -184,11 +221,21 @@ def main():
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w") as handle:
+        written = 0
         for index, record in enumerate(records):
+            if written == args.limit:
+                break
             trajectory_type = "teacher" if index % 2 == 0 else "recovery"
-            generated = run_record(record, model, processor, device, args, trajectory_type)
+            try:
+                generated = run_record(record, model, processor, device, args, trajectory_type)
+            except (ValueError, RuntimeError, json.JSONDecodeError) as error:
+                print(json.dumps({"sample_id": record["sample_id"], "trajectory_type": trajectory_type, "rejected": str(error)}))
+                continue
             handle.write(json.dumps(generated, ensure_ascii=False) + "\n")
             print(json.dumps({"sample_id": record["sample_id"], "trajectory_type": trajectory_type}))
+            written += 1
+        if written < args.limit:
+            raise RuntimeError(f"only generated {written} valid trajectories after scanning {len(records)} records")
 
 
 if __name__ == "__main__":
