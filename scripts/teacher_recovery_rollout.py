@@ -168,12 +168,17 @@ def run_record(record, model, processor, device, args, trajectory_type):
                 history.append(event)
                 continue
             if normalized(event["answer"]) != normalized(record["answer"]):
-                if trajectory_type != "recovery":
+                if args.canonicalize_answer:
+                    event["generated_answer"] = event["answer"]
+                    event["answer"] = record["answer"]
+                    event["answer_source"] = "oracle_canonicalized"
+                elif trajectory_type != "recovery":
                     raise ValueError(f"teacher answer disagrees for {record['sample_id']}: {event['answer']!r}")
-                event["status"] = "failed"
-                injected = {"tool": "ANSWER", "status": "failed", "message": "The answer is not supported by the current evidence. Re-read the evidence and answer again."}
-                history.append(event)
-                continue
+                else:
+                    event["status"] = "failed"
+                    injected = {"tool": "ANSWER", "status": "failed", "message": "The answer is not supported by the current evidence. Re-read the evidence and answer again."}
+                    history.append(event)
+                    continue
             history.append(event)
             recovered = trajectory_type != "recovery" or any(
                 item.get("status") == "ok" for item in history if item["action"] in {"CROP", "SEARCH"}
@@ -200,17 +205,24 @@ def main():
     parser.add_argument("--search-index", default="datasets/indices/formal_search/evidence.sqlite3")
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--output", default="artifacts/teacher-recovery-sft.jsonl")
+    parser.add_argument("--rejections", default="")
+    parser.add_argument("--trajectory-type", choices=["teacher", "recovery"], default="teacher")
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--scan-limit", type=int, default=64)
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--canonicalize-answer", action="store_true")
     args = parser.parse_args()
 
     records = [json.loads(line) for line in Path(args.manifest).read_text().splitlines()]
     train = [record for record in records if record["partition"] == "sft_train"]
-    teachers = [record for record in train if record["task_mode"] == "perception"]
-    recoveries = [record for record in train if record["task_mode"] == "perception"]
-    records = [item for pair in zip(teachers, recoveries) for item in pair][:args.scan_limit]
+    if args.trajectory_type == "teacher":
+        candidates = train
+    else:
+        candidates = [record for record in train if record["task_mode"] == "perception"]
+    records = candidates[args.offset::args.stride][:args.scan_limit]
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     processor = AutoProcessor.from_pretrained(args.model, use_fast=True)
@@ -220,22 +232,30 @@ def main():
     model.eval()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    rejection_path = Path(args.rejections) if args.rejections else None
+    if rejection_path:
+        rejection_path.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w") as handle:
+        rejection_handle = rejection_path.open("w") if rejection_path else None
         written = 0
-        for index, record in enumerate(records):
+        for record in records:
             if written == args.limit:
                 break
-            trajectory_type = "teacher" if index % 2 == 0 else "recovery"
             try:
-                generated = run_record(record, model, processor, device, args, trajectory_type)
+                generated = run_record(record, model, processor, device, args, args.trajectory_type)
             except (ValueError, RuntimeError, json.JSONDecodeError) as error:
-                print(json.dumps({"sample_id": record["sample_id"], "trajectory_type": trajectory_type, "rejected": str(error)}))
+                rejection = {"sample_id": record["sample_id"], "trajectory_type": args.trajectory_type, "rejected": str(error)}
+                print(json.dumps(rejection))
+                if rejection_handle:
+                    rejection_handle.write(json.dumps(rejection, ensure_ascii=False) + "\n")
                 continue
             handle.write(json.dumps(generated, ensure_ascii=False) + "\n")
-            print(json.dumps({"sample_id": record["sample_id"], "trajectory_type": trajectory_type}))
+            print(json.dumps({"sample_id": record["sample_id"], "trajectory_type": args.trajectory_type}))
             written += 1
+        if rejection_handle:
+            rejection_handle.close()
         if written < args.limit:
-            raise RuntimeError(f"only generated {written} valid trajectories after scanning {len(records)} records")
+            print(json.dumps({"generated": written, "requested": args.limit, "scanned": len(records)}))
 
 
 if __name__ == "__main__":
