@@ -2,3 +2,4 @@
 /checkpoints/
 /datasets/
 /logs/
+scripts/__pycache__/
