@@ -3,12 +3,13 @@
 
 import argparse
 import json
+import re
 import sqlite3
 from pathlib import Path
 
 import torch
 from PIL import Image
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
 def model_step(model, processor, image, prompt, device, max_new_tokens):
@@ -22,20 +23,32 @@ def model_step(model, processor, image, prompt, device, max_new_tokens):
 
 
 def search(index_path, sample_id, query):
+    terms = re.findall(r"[A-Za-z0-9]+", query.lower())
+    fts_query = " OR ".join(f'"{term}"' for term in terms if len(term) > 2)
     connection = sqlite3.connect(index_path)
     row = connection.execute(
-        "SELECT evidence_id, title FROM evidence WHERE sample_id = ? ORDER BY rank LIMIT 1",
-        (sample_id,),
+        "SELECT e.evidence_id, e.title FROM evidence AS e "
+        "JOIN evidence_fts AS f ON f.evidence_id = e.evidence_id "
+        "WHERE e.sample_id = ? AND evidence_fts MATCH ? ORDER BY e.rank LIMIT 1",
+        (sample_id, fts_query),
     ).fetchone()
     connection.close()
     return {"evidence_id": row[0], "title": row[1], "query": query} if row else None
 
 
 def action_prompt(record, history, injected):
+    if record["task_mode"] == "perception":
+        route = "The next useful action must be CROP on the root image. Do not ANSWER before CROP."
+    elif record["requires_search"]:
+        route = "The next useful action must be SEARCH. Do not ANSWER before SEARCH."
+    else:
+        route = "This task is search-free; ANSWER directly using the root image."
     return (
         "You are a multimodal evidence agent. Return exactly one JSON action. "
         "Allowed actions: CROP with bbox [x0,y0,x1,y1], SEARCH with query, or "
-        "ANSWER with answer and evidence_id. Do not add markdown.\n"
+        "ANSWER with answer and evidence_id. Bbox coordinates are normalized from 0 to 1. "
+        "Do not add markdown or explanations.\n"
+        f"{route}\n"
         f"Question: {record['question']}\n"
         f"Environment history: {json.dumps(history, ensure_ascii=False)}\n"
         f"Environment feedback: {json.dumps(injected, ensure_ascii=False)}"
@@ -43,53 +56,103 @@ def action_prompt(record, history, injected):
 
 
 def parse_action(raw):
-    start, end = raw.find("{"), raw.rfind("}")
-    return json.loads(raw[start:end + 1])
+    start = raw.find("{")
+    if start < 0:
+        raise ValueError(f"teacher output is not JSON: {raw!r}")
+    action, _ = json.JSONDecoder().raw_decode(raw[start:])
+    return action
+
+
+def normalized(value):
+    return " ".join(str(value).strip().lower().split())
+
+
+def crop_bbox(value):
+    bbox = [max(0.0, min(1.0, float(item))) for item in value]
+    x0, y0, x1, y1 = bbox
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"invalid crop bbox: {value!r}")
+    return bbox
 
 
 def run_record(record, model, processor, device, args, trajectory_type):
     image = Image.open(args.image_root / record["image_path"]).convert("RGB")
     current_image = image
     history = []
+    raw_actions = []
+    current_evidence = record["answer_evidence_id"] if not record["requires_search"] and record["task_mode"] == "knowledge" else None
     injected = {}
     if trajectory_type == "recovery":
+        if record["task_mode"] == "knowledge" and not record["requires_search"]:
+            raise ValueError(f"cannot inject recovery into a direct-answer record: {record['sample_id']}")
         width, height = image.size
         wrong = image.crop((0, 0, max(1, width // 5), max(1, height // 5)))
-        current_image = wrong
+        current_image = image
         history.append({
             "action": "CROP",
             "bbox": [0.0, 0.0, 0.2, 0.2],
             "status": "failed",
             "evidence_id": f"{record['sample_id']}:recovery_bad_crop",
         })
-        injected = {"tool": "CROP", "status": "failed", "message": "The crop did not contain the answer. Choose another action."}
+        if record["task_mode"] == "knowledge":
+            history[-1] = {
+                "action": "SEARCH",
+                "query": "irrelevant recovery query",
+                "status": "failed",
+                "evidence_id": f"{record['sample_id']}:recovery_bad_search",
+            }
+            injected = {"tool": "SEARCH", "status": "failed", "message": "No supporting result. Search again with a useful query."}
+        else:
+            injected = {"tool": "CROP", "status": "failed", "message": "The crop did not contain the answer. Choose another action."}
     for _ in range(args.max_steps):
         raw = model_step(model, processor, current_image, action_prompt(record, history, injected), device, args.max_new_tokens)
         action = parse_action(raw)
+        raw_actions.append(raw)
         name = action["action"]
-        event = {"action": name, "raw": raw}
+        event = {"action": name}
         if name == "CROP":
-            event["bbox"] = action["bbox"]
+            if record["task_mode"] != "perception" or current_evidence is not None:
+                raise ValueError(f"invalid CROP route for {record['sample_id']}")
+            event["bbox"] = crop_bbox(action["bbox"])
             width, height = image.size
-            x0, y0, x1, y1 = action["bbox"]
+            x0, y0, x1, y1 = event["bbox"]
             current_image = image.crop((int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height)))
-            injected = {"tool": "CROP", "status": "ok", "evidence_id": f"{record['sample_id']}:teacher_crop:{len(history)}"}
+            current_evidence = f"{record['sample_id']}:teacher_crop:{len(history)}"
+            event["evidence_id"] = current_evidence
+            event["status"] = "ok"
+            injected = {"tool": "CROP", "status": "ok", "evidence_id": current_evidence}
         elif name == "SEARCH":
+            if record["task_mode"] != "knowledge" or current_evidence is not None:
+                raise ValueError(f"invalid SEARCH route for {record['sample_id']}")
             result = search(args.search_index, record["sample_id"], action["query"])
             if result is None:
-                injected = {"tool": "SEARCH", "status": "no_result"}
+                raise ValueError(f"search returned no evidence for {record['sample_id']}")
             else:
+                current_evidence = result["evidence_id"]
+                event["query"] = action["query"]
+                event["evidence_id"] = current_evidence
+                event["status"] = "ok"
                 injected = {"tool": "SEARCH", "status": "ok", **result}
         elif name == "ANSWER":
+            if current_evidence is None:
+                raise ValueError(f"ANSWER before evidence for {record['sample_id']}")
             event["answer"] = action["answer"]
             event["evidence_id"] = action.get("evidence_id")
+            if event["evidence_id"] != current_evidence:
+                raise ValueError(f"ANSWER cited unknown evidence for {record['sample_id']}")
+            if normalized(event["answer"]) != normalized(record["answer"]):
+                raise ValueError(f"teacher answer disagrees for {record['sample_id']}: {event['answer']!r}")
             history.append(event)
+            recovered = trajectory_type != "recovery" or any(
+                item.get("status") == "ok" for item in history if item["action"] in {"CROP", "SEARCH"}
+            )
+            if not recovered:
+                raise RuntimeError(f"teacher did not recover sample {record['sample_id']}")
             return {**record, "trajectory_type": trajectory_type, "trajectory": history,
-                    "teacher_raw_actions": [item["raw"] for item in history],
+                    "teacher_raw_actions": raw_actions,
+                    "teacher_model": args.model,
                     "recovery_injected": trajectory_type == "recovery",
-                    "recovered": trajectory_type != "recovery" or any(
-                        item.get("status") == "ok" for item in history if item["action"] == "CROP"
-                    )}
+                    "recovered": recovered}
         else:
             injected = {"error": "invalid_action", "message": "Use CROP, SEARCH, or ANSWER."}
         event["feedback"] = injected
@@ -106,7 +169,7 @@ def main():
     parser.add_argument("--output", default="artifacts/teacher-recovery-sft.jsonl")
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=4)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     args = parser.parse_args()
 
     records = [json.loads(line) for line in Path(args.manifest).read_text().splitlines()]
@@ -114,7 +177,7 @@ def main():
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     processor = AutoProcessor.from_pretrained(args.model, use_fast=True)
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         args.model, dtype=torch.bfloat16, device_map="cuda:0"
     )
     model.eval()
