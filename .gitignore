@@ -2,4 +2,5 @@
 /checkpoints/
 /datasets/
 /logs/
+/runs/
 scripts/__pycache__/

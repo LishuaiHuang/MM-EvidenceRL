@@ -96,8 +96,8 @@ FVQA 索引已经有正文。
 - knowledge 且无需检索：直接 `ANSWER`。
 
 这不是说项目目标永远只有一步。项目方案把多轮 episode 和 multi-turn GRPO 作为后续
-目标，但当前计算节点已验证的最小闭环是单工具路径，正式 6,000 条也全部是 Oracle
-单步轨迹。
+目标，但当前计算节点已验证的最小闭环是单工具路径；正式训练集是 5,400 条混合
+Oracle/Teacher 单步轨迹，另有 600 条 dev 记录，dev 不参与训练。
 
 ## Q5：如果改成多轮，是否必须重做 SFT？
 
@@ -140,7 +140,12 @@ FVQA 索引已经有正文。
 
 ## Q6：SFT 是否严格按感知/知识二分类？输入会明确告诉模型类型吗？
 
-数据有 `task_mode` 元数据，但当前训练 prompt **没有额外插入一个显式的 `task_mode=perception/knowledge` 标签**。prompt 会给出任务问题和简短路线约束，例如感知任务要求 `CROP then ANSWER`，需要检索的知识任务要求 `SEARCH then ANSWER`。因此模型主要从问题、图像和目标 action 轨迹学习，而不是依赖一个隐藏类别 token。
+数据有 `task_mode` 元数据。当前训练 prompt 没有插入机器可解析的
+`<task_mode=...>` 特殊 token，但会用自然语言明确写出当前路线，例如
+`For this perception task, use the route CROP then ANSWER`，或
+`For this knowledge task, use the route SEARCH then ANSWER`。也就是说，类型/路线对模型
+是显式可见的，只是通过普通文本表达，而不是单独的分类头或特殊 token。模型仍会同时
+看到图像、问题和目标 action 轨迹。
 
 当前数据的动作空间仍是三选一：`CROP`、`SEARCH`、`ANSWER`。对大多数正式样本，第一步路线是二选一：感知样本走 CROP，需检索知识样本走 SEARCH；另有 482 条知识样本是直接 ANSWER。不是所有知识问题都强制 SEARCH。
 
@@ -206,7 +211,7 @@ Recovery 会教模型读取失败反馈并再次调用工具。当前正式集�
 
 四条样本会被拼成四个独立的单样本 batch，图片和 prompt 每次重新编码。响应序列分别是两行、两行、三行、三行 JSON action。loss mask 只覆盖这些 response 行，因此不会训练模型复述问题或系统 prompt。四条样本混合训练不会改变类别定义；它只让模型看到成功动作、失败反馈后的恢复动作，以及未来可能的 SEARCH 重试形态。
 
-本轮正式训练实际使用了同样的 LoRA + response-only mask 机制，只是规模为 5,400 条、单 GPU、1 epoch。四样本演示不另存为正式 checkpoint，也不替代主实验。
+本轮正式训练实际使用了同样的 LoRA + response-only mask 机制，只是规模为 5,400 条、单 GPU、1 epoch。四样本演示在本地实际跑通了 4 steps，首步 loss 为 `1.9286`，输出到临时目录 `/tmp/mm-evidence-sft-four-20260917`，TensorBoard event 输出到 `/tmp/mm-evidence-sft-four-tb-20260917`；它不替代正式 checkpoint。
 
 ## Q11：后续能否先训连接器，再训视觉编码器和 LLM？DeepStack 式多层 ViT 特征是否值得？
 
