@@ -1,6 +1,13 @@
 # 训练协议与证据检索 Q&A
 
-更新时间：2026-09-16
+更新时间：2026-09-17
+
+## 本轮状态
+
+- 正式 SFT 数据已组装为 `artifacts/sft-full/formal_sft.jsonl`，共 5,400 条：3,880 条 Oracle、1,520 条 Teacher，Recovery 为 0。
+- 正式 LoRA SFT 已完成 5,400 步，输出在 `artifacts/sft-lora-corrected/`，TensorBoard 在 `runs/sft-lora-corrected/`，训练日志在 `logs/sft-lora.log`。
+- 当前正式轨迹签名只有 `CROP → ANSWER`、`SEARCH → ANSWER`、直接 `ANSWER`；没有同时包含 CROP 和 SEARCH 的正式样本。
+- `sft_train` 中感知 3,780 条，知识且需要 SEARCH 1,138 条，知识但直接回答 482 条。这里的“知识类”不是一律搜索。
 
 ## 结论先行
 
@@ -130,3 +137,85 @@ FVQA 索引已经有正文。
 | `<think>` | 否 | 否 |
 | 正文 snippet | knowledge 证据质量有影响 | 值得做索引增强，不必重做全部 Oracle |
 | 多轮 CROP/SEARCH | 阻塞未来 multi-turn GRPO，不阻塞单步 SFT | 不重做全部；后续追加数据 |
+
+## Q6：SFT 是否严格按感知/知识二分类？输入会明确告诉模型类型吗？
+
+数据有 `task_mode` 元数据，但当前训练 prompt **没有额外插入一个显式的 `task_mode=perception/knowledge` 标签**。prompt 会给出任务问题和简短路线约束，例如感知任务要求 `CROP then ANSWER`，需要检索的知识任务要求 `SEARCH then ANSWER`。因此模型主要从问题、图像和目标 action 轨迹学习，而不是依赖一个隐藏类别 token。
+
+当前数据的动作空间仍是三选一：`CROP`、`SEARCH`、`ANSWER`。对大多数正式样本，第一步路线是二选一：感知样本走 CROP，需检索知识样本走 SEARCH；另有 482 条知识样本是直接 ANSWER。不是所有知识问题都强制 SEARCH。
+
+## Q7：现在是不是没有既 CROP 又 SEARCH 的 SFT 样本？
+
+是。对 5,400 条正式训练样本逐条检查，动作签名只有：
+
+```text
+CROP → ANSWER       3,780
+SEARCH → ANSWER     1,138
+ANSWER              482
+```
+
+同时含有 CROP 和 SEARCH 的样本数为 0。Recovery smoke 中曾有一条 `CROP → CROP → ANSWER`，但它没有进入正式 SFT 集；它只能作为链路演示，不能当作当前覆盖范围。
+
+## Q8：GRPO 能否进行既 CROP 又 SEARCH 的多轮轨迹？
+
+可以，但需要在 GRPO 环境层显式放开组合路线。当前 SFT 数据不包含这种监督，模型不会因为 SFT 自动学会可靠的 `CROP → SEARCH → ANSWER`。GRPO rollout 可以允许每轮从同一动作集合中选择，并维护：当前图像（root 或 crop）、evidence ledger、搜索结果、历史、最大步数和终止条件。每个动作都应产生新的 observation，最终只在引用有效 evidence 时给答案奖励。
+
+建议后续先支持最多 2--3 个工具步，例如 `CROP → SEARCH → ANSWER` 和 `SEARCH → CROP → ANSWER`，再逐步增加预算。需要补的不是 SFT 全量重做，而是多轮环境状态、动作 mask、逐轮 logprob、重复/无效动作惩罚和组合路线 reward。之后可以追加少量多轮 Teacher/Recovery 数据作为 warm start。
+
+## Q9：四条样本直观长什么样？
+
+下面的 JSONL 形状就是训练数据的核心：每行有图像、问题、答案和 trajectory；训练脚本把问题渲染为 prompt，把 trajectory 序列化为 response，只对 response token 计算 loss，prompt token 的 label 为 `-100`。
+
+### 1. 感知 Oracle
+
+```json
+{"task_mode":"perception","question":"Is the value of Satisfied dot line 45 in 2017?","trajectory":[{"action":"CROP","bbox":[5,75,302,286],"evidence_id":"chartqa_6356_00058:crop:0"},{"action":"ANSWER","answer":"No","evidence_id":"chartqa_6356_00058:crop:0"}]}
+```
+
+模型看到图片和问题，监督输出 CROP 的像素框，再用该 evidence_id 回答。
+
+### 2. 知识 SEARCH Oracle
+
+```json
+{"task_mode":"knowledge","question":"Where is this place located?","requires_search":true,"trajectory":[{"action":"SEARCH","query":"Where is this place located?","evidence_ids":["fvqa_train_67:search:1"]},{"action":"ANSWER","answer":"södertälje","evidence_id":"fvqa_train_67:search:1"}]}
+```
+
+模型先生成搜索 query，再引用搜索返回的 evidence。正式索引目前主要返回标题。
+
+### 3. 感知 Recovery
+
+这类样本先记录失败动作，再记录恢复动作；下面来自真实 smoke，不是 Oracle：
+
+```json
+{"task_mode":"perception","trajectory_type":"recovery","trajectory":[{"action":"CROP","bbox":[0.0,0.0,0.2,0.2],"status":"failed","evidence_id":"chartqa_10430_00002:recovery_bad_crop"},{"action":"CROP","bbox":[0.0118,0.1048,0.7953,0.8405],"status":"ok","evidence_id":"chartqa_10430_00002:teacher_crop:1"},{"action":"ANSWER","answer":"73","evidence_id":"chartqa_10430_00002:teacher_crop:1"}]}
+```
+
+Recovery 会教模型读取失败反馈并再次调用工具。当前正式集没有纳入 Recovery。
+
+### 4. 知识 Recovery（未来格式示例）
+
+当前没有通过质量门槛的真实知识 Recovery，因此下面是**说明格式的构造示例，不是训练数据**：
+
+```json
+{"task_mode":"knowledge","trajectory_type":"recovery","trajectory":[{"action":"SEARCH","query":"irrelevant query","status":"failed","evidence_id":"fvqa_train_X:bad_search"},{"action":"SEARCH","query":"Where is this place located?","status":"ok","evidence_id":"fvqa_train_X:search:1"},{"action":"ANSWER","answer":"södertälje","evidence_id":"fvqa_train_X:search:1"}]}
+```
+
+要把它用于 SFT，必须由真实环境生成并通过 query、evidence、答案一致性审计，不能把这个占位样本写入正式集。
+
+## Q10：四条样本实际模拟一次 SFT 会怎样？
+
+四条样本会被拼成四个独立的单样本 batch，图片和 prompt 每次重新编码。响应序列分别是两行、两行、三行、三行 JSON action。loss mask 只覆盖这些 response 行，因此不会训练模型复述问题或系统 prompt。四条样本混合训练不会改变类别定义；它只让模型看到成功动作、失败反馈后的恢复动作，以及未来可能的 SEARCH 重试形态。
+
+本轮正式训练实际使用了同样的 LoRA + response-only mask 机制，只是规模为 5,400 条、单 GPU、1 epoch。四样本演示不另存为正式 checkpoint，也不替代主实验。
+
+## Q11：后续能否先训连接器，再训视觉编码器和 LLM？DeepStack 式多层 ViT 特征是否值得？
+
+可以，工程上可拆成三个阶段：
+
+1. 先冻结 ViT 和 LLM，只训练 vision-language connector，让现有视觉 token 进入 LLM 的接口稳定；
+2. 再解冻视觉编码器的高层（必要时配合较小学习率），同时训练 connector，保持 LLM 冻结或只开 LoRA；
+3. 最后再决定是否解冻 LLM。每一步都应有独立 checkpoint 和显存预算。
+
+DeepStack 式提取 ViT 低/中/高层特征，送入 LLM，理论上可能提升小目标和精确 CROP 定位，因为浅层保留局部边缘，中层保留结构，高层保留语义。但代价也明确：视觉 token 数量、connector 参数和显存/吞吐都会上升；多层特征还需要位置/层级编码，避免 LLM 混淆同一 patch 的不同层表示。当前 CROP 主要是一次根图裁剪，先用现有单层接口完成 GRPO 环境和 reward，再用小规模定位指标比较 DeepStack；不建议现在为它重做 SFT。
+
+判断标准应是 bbox IoU、有效 evidence 引用率、答案准确率和每样本视觉 token/显存，而不是只看训练 loss。若多层特征不能带来明确定位收益，就保留简单 connector。
